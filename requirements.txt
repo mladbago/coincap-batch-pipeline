@@ -3,3 +3,4 @@ pandas
 pendulum
 apache-airflow
 pyarrow
+boto3

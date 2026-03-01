@@ -1,4 +1,6 @@
 import os
+
+import boto3
 import requests
 import pandas as pd
 import pendulum
@@ -8,7 +10,7 @@ from airflow.sdk import dag, task
 API_KEY = os.getenv("COINCAP_API_KEY")
 URL = "https://rest.coincap.io/v3/assets"
 BASE_PATH = "/opt/airflow/data/raw"
-
+S3_PREFIX = "raw"
 
 def normalize_schema(raw_json: dict) -> pd.DataFrame:
     """Flattens nested JSON and enforces strict Parquet schema."""
@@ -23,6 +25,21 @@ def normalize_schema(raw_json: dict) -> pd.DataFrame:
     df['ingested_at'] = datetime.now(timezone.utc)
 
     return df
+
+def generate_s3_key(local_path: str, base_dir: str, s3_prefix: str) -> str:
+    """Calculates the S3 destination path while preserving Hive partitions."""
+    # Example: converts "/opt/airflow/data/raw/year=2026/..." to "market_data/year=2026/..."
+    relative_path = os.path.relpath(local_path, base_dir)
+    return os.path.join(s3_prefix, relative_path).replace("\\", "/")
+
+def execute_s3_upload(local_path: str, bucket: str, s3_key: str) -> None:
+    """Handles the boto3 client authentication and file upload."""
+    s3_client = boto3.client(
+        's3',
+        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
+    )
+    s3_client.upload_file(local_path, bucket, s3_key)
 
 @dag(
     schedule="@daily",
@@ -46,7 +63,7 @@ def market_data_pipeline():
             raise
 
     @task()
-    def process_and_load(raw_json: dict):
+    def process_and_save_locally(raw_json: dict) -> str:
         df = normalize_schema(raw_json)
 
         if df.empty:
@@ -65,8 +82,28 @@ def market_data_pipeline():
         df.to_parquet(local_file, index=False, engine='pyarrow', compression='snappy')
         print(f"✅ Data successfully saved to: {local_file}")
 
-    raw_data = extract_data()
-    process_and_load(raw_data)
+        return local_file
 
+    @task()
+    def upload_to_s3(local_file_path: str):
+        if not local_file_path or not os.path.exists(local_file_path):
+            print(f"File not found: {local_file_path}")
+            return
+
+        bucket_name = os.getenv("S3_BUCKET_NAME")
+        if not bucket_name:
+            raise ValueError("S3_BUCKET_NAME environment variable is not set.")
+
+        s3_key = generate_s3_key(local_file_path, BASE_PATH, S3_PREFIX)
+
+        print(f"Uploading to s3://{bucket_name}/{s3_key}...")
+        execute_s3_upload(local_file_path, bucket_name, s3_key)
+
+        os.remove(local_file_path)
+        print("✅ Upload successful. Local file deleted.")
+
+    raw_data = extract_data()
+    saved_file_path = process_and_save_locally(raw_data)
+    upload_to_s3(saved_file_path)
 
 market_data_pipeline()
