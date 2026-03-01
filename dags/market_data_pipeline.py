@@ -5,13 +5,15 @@ import requests
 import pandas as pd
 import pendulum
 from datetime import datetime, timezone
-from airflow.sdk import dag, task
+from airflow.sdk import dag, task, PokeReturnValue
 
 API_KEY = os.getenv("COINCAP_API_KEY")
 URL = "https://rest.coincap.io/v3/assets"
 BASE_PATH = "/opt/airflow/data/raw"
 S3_PREFIX = "raw"
-
+GLUE_JOB_NAME = os.getenv("GLUE_JOB_NAME")
+AWS_REGION = os.getenv("AWS_REGION")
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 def normalize_schema(raw_json: dict) -> pd.DataFrame:
     """Flattens nested JSON and enforces strict Parquet schema."""
     if not raw_json or 'data' not in raw_json:
@@ -40,6 +42,36 @@ def execute_s3_upload(local_path: str, bucket: str, s3_key: str) -> None:
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
     )
     s3_client.upload_file(local_path, bucket, s3_key)
+
+
+def send_slack_alert(message: str, is_success: bool):
+    """Sends a formatted message to a Slack channel."""
+    webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+    if not webhook_url:
+        print("No Slack Webhook URL found. Skipping alert.")
+        return
+
+    color = "#36a64f" if is_success else "#ff0000"
+    icon = ":large_green_circle:" if is_success else ":red_circle:"
+
+    payload = {
+        "attachments": [
+            {
+                "color": color,
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": f"{icon} *CoinCap Pipeline Update*\n{message}"}
+                    }
+                ]
+            }
+        ]
+    }
+
+    try:
+        requests.post(webhook_url, json=payload)
+    except Exception as e:
+        print(f"Failed to send Slack alert: {e}")
 
 @dag(
     schedule="@daily",
@@ -102,8 +134,42 @@ def market_data_pipeline():
         os.remove(local_file_path)
         print("✅ Upload successful. Local file deleted.")
 
+    @task()
+    def trigger_glue_job():
+        glue_client = boto3.client('glue',
+                                   region_name=AWS_REGION,
+                                   aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                                   aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"))
+        response = glue_client.start_job_run(JobName=GLUE_JOB_NAME)
+        return response['JobRunId']
+
+    @task.sensor(poke_interval=15, timeout=600, mode="reschedule")
+    def wait_for_glue_job(job_run_id: str) -> PokeReturnValue:
+        glue_client = boto3.client('glue',
+                                   region_name=AWS_REGION,
+                                   aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+                                   aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"))
+        response = glue_client.get_job_run(JobName=GLUE_JOB_NAME, RunId=job_run_id)
+        status = response['JobRun']['JobRunState']
+        print(f"Glue job status: {status}")
+
+        if status in ['SUCCEEDED']:
+            send_slack_alert(
+                f"AWS Glue Job `{GLUE_JOB_NAME}` successfully cleansed the data and loaded it into the Tranformed s3 bucket!",
+                is_success=True)
+            return PokeReturnValue(True, "Glue job completed successfully.")
+        elif status in ['FAILED', 'STOPPED']:
+            send_slack_alert(
+                f"AWS Glue Job `{GLUE_JOB_NAME}` hit a critical failure ({status}). Please check the AWS Console.",
+                is_success=False)
+            raise Exception(f"Glue job failed with status: {status}")
+        else:
+            return PokeReturnValue(False, f"Glue job still running with status: {status}")
     raw_data = extract_data()
     saved_file_path = process_and_save_locally(raw_data)
-    upload_to_s3(saved_file_path)
+    s3_upload_task = upload_to_s3(saved_file_path)
+    glue_run_id = trigger_glue_job()
+    glue_sensor_task = wait_for_glue_job(glue_run_id)
 
+    s3_upload_task >> glue_run_id
 market_data_pipeline()
