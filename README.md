@@ -1,22 +1,29 @@
-# Cryptocurrency Market Data Pipeline
+# End-to-End Crypto Data Pipeline
 
-An automated, containerized Data Engineering pipeline that extracts real-time cryptocurrency market data from the CoinCap API and stages it in a local Data Lakehouse architecture.
+### 📊 Project Overview
+An automated ETL data pipeline that extracts live cryptocurrency market data from a REST API, orchestrates cloud processing, and serves the data for querying and visualization. 
 
-## 🏗️ Architecture (Current State)
-This project currently implements the **Bronze Layer** (Raw Ingestion) of a Medallion Architecture.
+This project demonstrates core Data Engineering principles: API extraction, cloud storage management, asynchronous orchestration, and data observability.
 
-1. **Extract:** Apache Airflow hits the CoinCap REST API `v3/assets` endpoint daily.
-2. **Normalize:** Nested JSON structures are flattened and schema-enforced.
-3. **Load:** Data is partitioned by execution date (`year/month/day`) and saved as Snappy-compressed Parquet files.
+### 🏗️ Architecture
+<div align="center">
+  <img src="./assets/diagram.png" alt="Data Pipeline Architecture Diagram" width="900"/>
+</div>
 
-## 🛠️ Tech Stack
-* **Orchestration:** Apache Airflow 3.1.7 (TaskFlow API)
-* **Processing:** Python, Pandas, PyArrow
-* **Storage format:** Apache Parquet (Snappy compression)
-* **Infrastructure:** Docker & Docker Compose (LocalExecutor)
+### 🛠️ Tech Stack
+* **Orchestration:** Apache Airflow (Dockerized), Slack API (Webhooks)
+* **Storage & Compute:** Amazon S3, AWS Glue (Python Shell), AWS IAM
+* **Serving & Analytics:** AWS Athena (Presto/Trino SQL), AWS Glue Data Catalog
+* **Visualization:** Amazon QuickSight (to do)
+* **Languages:** Python (`pandas`, `awswrangler`, `boto3`), SQL
 
-## 🚀 How to Run Locally
+### 🚀 Key Engineering Highlights
 
-### Prerequisites
-* Docker and Docker Compose installed
-* A free [CoinCap API Key](https://coincap.io/)
+* **Cloud Data Processing:** Extracted raw JSON payloads from the CoinCap API and processed them into strongly-typed, Snappy-compressed Parquet files. Enforced schema rules and partitioned the data by date (`year/month/day`) for optimized querying.
+* **Optimized Orchestration:** Implemented Airflow Sensors with `mode='reschedule'` to monitor asynchronous AWS Glue jobs. This ensures Airflow worker nodes are released and not held hostage while waiting for external cloud tasks to finish.
+* **Data Observability:** Integrated a custom Slack Webhook to deliver real-time pipeline status alerts (Success/Failure) for proactive monitoring.
+* **Serverless Analytics & Automations:** Bypassed expensive AWS Glue Crawlers by utilizing the `awswrangler` library to automatically register new daily S3 partitions directly into the Glue Data Catalog. 
+* **Cost Optimization:** Implemented strict S3 Lifecycle Rules to automatically purge ephemeral Athena query results after 7 days, maintaining a zero-waste storage environment.
+
+### 🛣️ Path to Production
+While this repository currently utilizes a local Dockerized Airflow instance for isolated development and testing, the decoupled architecture is explicitly designed to be lifted and shifted to a fully managed enterprise environment, such as **Amazon Managed Workflows for Apache Airflow (MWAA)** or deployed via Helm to a **Kubernetes (Amazon EKS)** cluster utilizing the `KubernetesExecutor` for horizontal scaling.
