@@ -14,6 +14,7 @@ S3_PREFIX = "raw"
 GLUE_JOB_NAME = os.getenv("GLUE_JOB_NAME")
 AWS_REGION = os.getenv("AWS_REGION")
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
+
 def normalize_schema(raw_json: dict) -> pd.DataFrame:
     """Flattens nested JSON and enforces strict Parquet schema."""
     if not raw_json or 'data' not in raw_json:
